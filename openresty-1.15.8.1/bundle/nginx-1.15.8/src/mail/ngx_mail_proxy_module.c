@@ -108,6 +108,68 @@ ngx_module_t  ngx_mail_proxy_module = {
 static u_char  smtp_auth_ok[] = "235 2.0.0 OK" CRLF;
 
 
+void ngx_mail_proxy_set_handler(ngx_mail_session_t *s, ngx_mail_proxy_ctx_t *p)
+{
+    p->upstream.connection->write->handler = ngx_mail_proxy_dummy_handler;
+    switch (s->protocol) {
+
+    case NGX_MAIL_POP3_PROTOCOL:
+        p->upstream.connection->read->handler = ngx_mail_proxy_pop3_handler;
+        s->mail_state = ngx_pop3_start;
+        break;
+
+    case NGX_MAIL_IMAP_PROTOCOL:
+        p->upstream.connection->read->handler = ngx_mail_proxy_imap_handler;
+        s->mail_state = ngx_imap_start;
+        break;
+
+    default: /* NGX_MAIL_SMTP_PROTOCOL */
+        p->upstream.connection->read->handler = ngx_mail_proxy_smtp_handler;
+        s->mail_state = ngx_smtp_start;
+        break;
+    }
+}
+
+#if (NGX_MAIL_SSL)
+void ngx_mail_upstream_ssl_handshake_handler(ngx_connection_t *c)
+{
+    ngx_mail_session_t        *s;
+    ngx_mail_proxy_ctx_t      *p;
+	ngx_mail_ssl_conf_t  *sslcf;
+	ngx_int_t rc;	
+    X509                      *cert;
+
+	s = c->data;
+	p = s->proxy;
+
+    if (c->ssl->handshaked) {
+		sslcf = ngx_mail_get_module_srv_conf(s, ngx_mail_ssl_module);
+		if(sslcf->verify)
+		{
+			rc = SSL_get_verify_result(c->ssl->connection);
+			if (rc != X509_V_OK && (sslcf->verify != 3 || !ngx_ssl_verify_error_optional(rc)))
+			{
+				ngx_mail_session_internal_server_error(s);
+				return;
+			}
+			
+			if (sslcf->verify == 1) {
+				cert = SSL_get_peer_certificate(c->ssl->connection);
+				if (cert == NULL) {
+					ngx_mail_session_internal_server_error(s);
+					return;
+				}
+				X509_free(cert);
+			}
+		}
+		ngx_mail_proxy_set_handler(s, p);
+		return;
+    }
+	
+	ngx_mail_session_internal_server_error(s);
+}
+#endif
+
 void
 ngx_mail_proxy_init(ngx_mail_session_t *s, ngx_addr_t *peer)
 {
@@ -148,7 +210,6 @@ ngx_mail_proxy_init(ngx_mail_session_t *s, ngx_addr_t *peer)
     p->upstream.connection->pool = s->connection->pool;
 
     s->connection->read->handler = ngx_mail_proxy_block_read;
-    p->upstream.connection->write->handler = ngx_mail_proxy_dummy_handler;
 
     pcf = ngx_mail_get_module_srv_conf(s, ngx_mail_proxy_module);
 
@@ -158,26 +219,34 @@ ngx_mail_proxy_init(ngx_mail_session_t *s, ngx_addr_t *peer)
         ngx_mail_proxy_internal_server_error(s);
         return;
     }
-
     s->out.len = 0;
+	ngx_mail_proxy_set_handler(s, p);
 
-    switch (s->protocol) {
+#if (NGX_MAIL_SSL)
+	{
+		ngx_mail_ssl_conf_t  *sslcf;
+	
+		sslcf = ngx_mail_get_module_srv_conf(s, ngx_mail_ssl_module);
+		if (!sslcf->enable_upstream) {
+			return;
+		}
+		p->upstream.connection->log->action = "SSL handshaking";
 
-    case NGX_MAIL_POP3_PROTOCOL:
-        p->upstream.connection->read->handler = ngx_mail_proxy_pop3_handler;
-        s->mail_state = ngx_pop3_start;
-        break;
+		if (NGX_OK!=ngx_ssl_create_connection(&sslcf->ssl, p->upstream.connection,
+	                                  NGX_SSL_BUFFER|NGX_SSL_CLIENT)) {
+	        ngx_mail_proxy_internal_server_error(s);
+	        return;
+	    }
+		
+		rc = ngx_ssl_handshake(p->upstream.connection);
+	    if (rc == NGX_AGAIN) {
+	        p->upstream.connection->ssl->handler = ngx_mail_upstream_ssl_handshake_handler;
+	        return;
+	    }
 
-    case NGX_MAIL_IMAP_PROTOCOL:
-        p->upstream.connection->read->handler = ngx_mail_proxy_imap_handler;
-        s->mail_state = ngx_imap_start;
-        break;
-
-    default: /* NGX_MAIL_SMTP_PROTOCOL */
-        p->upstream.connection->read->handler = ngx_mail_proxy_smtp_handler;
-        s->mail_state = ngx_smtp_start;
-        break;
-    }
+	    ngx_mail_upstream_ssl_handshake_handler(p->upstream.connection);
+	}
+#endif
 }
 
 
@@ -355,18 +424,19 @@ ngx_mail_proxy_imap_handler(ngx_event_t *rev)
         s->connection->log->action = "sending LOGIN command to upstream";
 
         line.len = s->tag.len + sizeof("LOGIN ") - 1
-                   + 1 + NGX_SIZE_T_LEN + 1 + 2;
+                   + 1 + NGX_SIZE_T_LEN + s->login.len + 1 + s->passwd.len + 2;
+		
         line.data = ngx_pnalloc(c->pool, line.len);
         if (line.data == NULL) {
             ngx_mail_proxy_internal_server_error(s);
             return;
         }
 
-        line.len = ngx_sprintf(line.data, "%VLOGIN {%uz}" CRLF,
-                               &s->tag, s->login.len)
+        line.len = ngx_sprintf(line.data, "%VLOGIN %V %V" CRLF,
+                               &s->tag, &s->login, &s->passwd)
                    - line.data;
 
-        s->mail_state = ngx_imap_login;
+        s->mail_state = ngx_imap_passwd;
         break;
 
     case ngx_imap_login:
@@ -444,6 +514,63 @@ ngx_mail_proxy_imap_handler(ngx_event_t *rev)
     s->proxy->buffer->last = s->proxy->buffer->start;
 }
 
+static ngx_int_t ngx_mail_proxy_smtp_auth_handler(ngx_mail_session_t *s,
+	ngx_connection_t *c, ngx_str_t *line)
+{
+    u_char                    *p;
+    ngx_str_t                  authplain, authplain_base64;
+
+	switch(s->mail_state)
+	{
+		case ngx_smtp_pre_auth_plain:
+			authplain.len = s->login.len + s->passwd.len + 1;
+			authplain.data = ngx_pnalloc(c->pool, authplain.len);
+			if (authplain.data == NULL) {
+				return NGX_ERROR;
+			}
+			p = ngx_cpymem(authplain.data, s->login.data, s->login.len);
+			*p++ = '\0';
+			p = ngx_cpymem(p, s->passwd.data, s->passwd.len);
+		
+			authplain_base64.len = ngx_base64_encoded_length(authplain.len);
+			authplain_base64.data = ngx_pnalloc(c->pool, authplain_base64.len);
+			if (authplain_base64.data == NULL) {
+				return NGX_ERROR;
+			}
+			ngx_encode_base64(&authplain_base64, &authplain);
+		
+			line->len = sizeof("AUTH PLAIN ") -1 + authplain_base64.len + 2;
+			line->data = ngx_pnalloc(c->pool, line->len);
+			if (line->data == NULL) {
+				return NGX_ERROR;
+			}
+			p = ngx_cpymem(line->data, "AUTH PLAIN ", sizeof("AUTH PLAIN ")-1);
+			p = ngx_cpymem(p, authplain_base64.data, authplain_base64.len);
+			*p++ = CR; *p = LF;
+			
+			s->mail_state = ngx_smtp_auth_plain;
+			break;
+		
+		case ngx_smtp_pre_auth_login:
+			line->len = sizeof("AUTH LOGIN") + 1;
+			line->data = ngx_pnalloc(c->pool, line->len);
+			if (line->data == NULL) {
+				return NGX_ERROR;
+			}
+			p = ngx_cpymem(line->data, "AUTH LOGIN", sizeof("AUTH LOGIN")-1);
+			*p++ = CR; *p = LF;
+			
+			s->mail_state = ngx_smtp_auth_login;
+			break;
+		
+		case ngx_smtp_auth_login_username:
+		case ngx_smtp_auth_cram_md5: //TODO暂时不支持
+		case ngx_smtp_auth_external:
+			return NGX_ERROR;
+	}
+	
+	return NGX_OK;
+}
 
 static void
 ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
@@ -451,7 +578,6 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
     u_char                    *p;
     ngx_int_t                  rc;
     ngx_str_t                  line;
-    ngx_buf_t                 *b;
     ngx_connection_t          *c;
     ngx_mail_session_t        *s;
     ngx_mail_proxy_conf_t     *pcf;
@@ -507,98 +633,68 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
         p = ngx_cpymem(p, cscf->server_name.data, cscf->server_name.len);
         *p++ = CR; *p = LF;
 
-        if (pcf->xclient) {
-            s->mail_state = ngx_smtp_helo_xclient;
-
-        } else if (s->auth_method == NGX_MAIL_AUTH_NONE) {
-            s->mail_state = ngx_smtp_helo_from;
-
-        } else {
-            s->mail_state = ngx_smtp_helo;
-        }
-
+		if(s->auth_method == NGX_MAIL_AUTH_NONE){
+			s->mail_state = ngx_smtp_helo_from;
+		}
+		else{
+			s->mail_state = ngx_smtp_helo;
+		}
         break;
 
-    case ngx_smtp_helo_xclient:
-        ngx_log_debug0(NGX_LOG_DEBUG_MAIL, rev->log, 0,
-                       "mail proxy send xclient");
+    case ngx_smtp_helo:
+		switch(s->auth_method)
+		{
+			case NGX_MAIL_AUTH_PLAIN:
+				s->mail_state = ngx_smtp_pre_auth_plain;
+				break;
+			case NGX_MAIL_AUTH_LOGIN:
+				s->mail_state = ngx_smtp_pre_auth_login;
+				break;
+			case NGX_MAIL_AUTH_LOGIN_USERNAME:
+				s->mail_state = ngx_smtp_auth_login_username;
+				break;
+			case NGX_MAIL_AUTH_CRAM_MD5:
+				s->mail_state = ngx_smtp_auth_cram_md5;
+				break;
+			case NGX_MAIL_AUTH_EXTERNAL:
+				s->mail_state = ngx_smtp_auth_external;
+				break;
+			case NGX_MAIL_AUTH_APOP:
+ 			default:
+				ngx_mail_proxy_internal_server_error(s); 
+				return;
+		}
+		if(NGX_ERROR==ngx_mail_proxy_smtp_auth_handler(s, c, &line))
+		{
+			ngx_mail_proxy_internal_server_error(s); 
+			return;
+		}
+		break;
+		
+	case ngx_smtp_auth_login:
+		line.len = ngx_base64_encoded_length(s->login.len) + 2;
+		line.data = ngx_pnalloc(c->pool, line.len);
+		if (line.data == NULL) {
+			ngx_mail_proxy_internal_server_error(s);
+			return;
+		}
+		ngx_encode_base64(&line, &s->login);
+		*(line.data + line.len) = CR; *(line.data + line.len + 1) = LF; line.len+=2;
 
-        s->connection->log->action = "sending XCLIENT to upstream";
+		s->mail_state = ngx_smtp_auth_username;
+		break;
+	case ngx_smtp_auth_username:
+		line.len = ngx_base64_encoded_length(s->passwd.len) + 2;
+		line.data = ngx_pnalloc(c->pool, line.len);
+		if (line.data == NULL) {
+			ngx_mail_proxy_internal_server_error(s);
+			return;
+		}
+		ngx_encode_base64(&line, &s->passwd);
+		*(line.data + line.len) = CR; *(line.data + line.len + 1) = LF; line.len+=2;
 
-        line.len = sizeof("XCLIENT ADDR= LOGIN= NAME="
-                          CRLF) - 1
-                   + s->connection->addr_text.len + s->login.len + s->host.len;
-
-#if (NGX_HAVE_INET6)
-        if (s->connection->sockaddr->sa_family == AF_INET6) {
-            line.len += sizeof("IPV6:") - 1;
-        }
-#endif
-
-        line.data = ngx_pnalloc(c->pool, line.len);
-        if (line.data == NULL) {
-            ngx_mail_proxy_internal_server_error(s);
-            return;
-        }
-
-        p = ngx_cpymem(line.data, "XCLIENT ADDR=", sizeof("XCLIENT ADDR=") - 1);
-
-#if (NGX_HAVE_INET6)
-        if (s->connection->sockaddr->sa_family == AF_INET6) {
-            p = ngx_cpymem(p, "IPV6:", sizeof("IPV6:") - 1);
-        }
-#endif
-
-        p = ngx_copy(p, s->connection->addr_text.data,
-                     s->connection->addr_text.len);
-
-        if (s->login.len) {
-            p = ngx_cpymem(p, " LOGIN=", sizeof(" LOGIN=") - 1);
-            p = ngx_copy(p, s->login.data, s->login.len);
-        }
-
-        p = ngx_cpymem(p, " NAME=", sizeof(" NAME=") - 1);
-        p = ngx_copy(p, s->host.data, s->host.len);
-
-        *p++ = CR; *p++ = LF;
-
-        line.len = p - line.data;
-
-        if (s->smtp_helo.len) {
-            s->mail_state = ngx_smtp_xclient_helo;
-
-        } else if (s->auth_method == NGX_MAIL_AUTH_NONE) {
-            s->mail_state = ngx_smtp_xclient_from;
-
-        } else {
-            s->mail_state = ngx_smtp_xclient;
-        }
-
-        break;
-
-    case ngx_smtp_xclient_helo:
-        ngx_log_debug0(NGX_LOG_DEBUG_MAIL, rev->log, 0,
-                       "mail proxy send client ehlo");
-
-        s->connection->log->action = "sending client HELO/EHLO to upstream";
-
-        line.len = sizeof("HELO " CRLF) - 1 + s->smtp_helo.len;
-
-        line.data = ngx_pnalloc(c->pool, line.len);
-        if (line.data == NULL) {
-            ngx_mail_proxy_internal_server_error(s);
-            return;
-        }
-
-        line.len = ngx_sprintf(line.data,
-                       ((s->esmtp) ? "EHLO %V" CRLF : "HELO %V" CRLF),
-                       &s->smtp_helo)
-                   - line.data;
-
-        s->mail_state = (s->auth_method == NGX_MAIL_AUTH_NONE) ?
-                            ngx_smtp_helo_from : ngx_smtp_helo;
-
-        break;
+		s->mail_state = ngx_smtp_auth_password;
+		break;
 
     case ngx_smtp_helo_from:
     case ngx_smtp_xclient_from:
@@ -618,43 +714,25 @@ ngx_mail_proxy_smtp_handler(ngx_event_t *rev)
         *p++ = CR; *p = LF;
 
         s->mail_state = ngx_smtp_from;
-
         break;
 
-    case ngx_smtp_from:
-        ngx_log_debug0(NGX_LOG_DEBUG_MAIL, rev->log, 0,
-                       "mail proxy send rcpt to");
+	case ngx_smtp_auth_password:
+	case ngx_smtp_auth_plain:
+	case ngx_smtp_from:
+	case ngx_smtp_to:
+        cscf = ngx_mail_get_module_srv_conf(s, ngx_mail_core_module);
+        s->connection->read->handler = cscf->protocol->auth_state;
 
-        s->connection->log->action = "sending RCPT TO to upstream";
-
-        line.len = s->smtp_to.len + sizeof(CRLF) - 1;
-        line.data = ngx_pnalloc(c->pool, line.len);
-        if (line.data == NULL) {
-            ngx_mail_proxy_internal_server_error(s);
-            return;
-        }
-
-        p = ngx_cpymem(line.data, s->smtp_to.data, s->smtp_to.len);
-        *p++ = CR; *p = LF;
-
-        s->mail_state = ngx_smtp_to;
-
-        break;
-
-    case ngx_smtp_helo:
+		s->out.data = s->proxy->buffer->pos;
+		s->out.len  = s->proxy->buffer->last - s->proxy->buffer->pos;
+		ngx_mail_send(s->connection->write);
+		s->proxy->buffer->pos = s->proxy->buffer->start;
+		s->proxy->buffer->last = s->proxy->buffer->start;
+		//next state is drived by cscf->protocol->auth_state
+		return;
+		
+	case ngx_smtp_data:
     case ngx_smtp_xclient:
-    case ngx_smtp_to:
-
-        b = s->proxy->buffer;
-
-        if (s->auth_method == NGX_MAIL_AUTH_NONE) {
-            b->pos = b->start;
-
-        } else {
-            ngx_memcpy(b->start, smtp_auth_ok, sizeof(smtp_auth_ok) - 1);
-            b->last = b->start + sizeof(smtp_auth_ok) - 1;
-        }
-
         s->connection->read->handler = ngx_mail_proxy_handler;
         s->connection->write->handler = ngx_mail_proxy_handler;
         rev->handler = ngx_mail_proxy_handler;
@@ -820,6 +898,24 @@ ngx_mail_proxy_read_response(ngx_mail_session_t *s, ngx_uint_t state)
                 return NGX_OK;
             }
             break;
+
+		case ngx_smtp_auth_login:
+		case ngx_smtp_auth_username:
+			if (p[0] == '3' && p[1] == '3' && p[2] == '4') {
+                return NGX_OK;
+            }
+            break;
+		case ngx_smtp_auth_plain:
+		case ngx_smtp_auth_password:
+			if (p[0] == '2' && p[1] == '3' && p[2] == '5') {
+				return NGX_OK;
+			}
+			break;
+		case ngx_smtp_data:
+			if (p[0] == '3' && p[1] == '5' && p[2] == '4') {
+				return NGX_OK;
+			}
+			break;
 
         case ngx_smtp_helo:
         case ngx_smtp_helo_xclient:

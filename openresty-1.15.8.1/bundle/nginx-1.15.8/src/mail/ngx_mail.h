@@ -154,9 +154,14 @@ typedef enum {
 
 typedef enum {
     ngx_smtp_start = 0,
+	ngx_smtp_pre_auth_login,
+	ngx_smtp_auth_login, //add
     ngx_smtp_auth_login_username,
     ngx_smtp_auth_login_password,
+    ngx_smtp_pre_auth_plain, //add
     ngx_smtp_auth_plain,
+    ngx_smtp_auth_username, //add
+    ngx_smtp_auth_password, //add
     ngx_smtp_auth_cram_md5,
     ngx_smtp_auth_external,
     ngx_smtp_helo,
@@ -166,7 +171,8 @@ typedef enum {
     ngx_smtp_xclient_from,
     ngx_smtp_xclient_helo,
     ngx_smtp_from,
-    ngx_smtp_to
+    ngx_smtp_to,
+    ngx_smtp_data //add
 } ngx_smtp_state_e;
 
 
@@ -183,6 +189,7 @@ typedef struct {
 
     ngx_str_t               out;
     ngx_buf_t              *buffer;
+    ngx_str_t               buffer_cmd;
 
     void                  **ctx;
     void                  **main_conf;
@@ -193,6 +200,7 @@ typedef struct {
     ngx_mail_proxy_ctx_t   *proxy;
 
     ngx_uint_t              mail_state;
+    ngx_uint_t              client_state;
 
     unsigned                protocol:3;
     unsigned                blocked:1;

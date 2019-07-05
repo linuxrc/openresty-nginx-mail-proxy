@@ -712,6 +712,9 @@ ngx_mail_read_command(ngx_mail_session_t *s, ngx_connection_t *c)
 
     n = c->recv(c, s->buffer->last, s->buffer->end - s->buffer->last);
 
+	s->buffer_cmd.data = s->buffer->last;
+	s->buffer_cmd.len  = n;
+	
     if (n == NGX_ERROR || n == 0) {
         ngx_mail_close_connection(c);
         return NGX_ERROR;

@@ -70,6 +70,13 @@ static ngx_command_t  ngx_mail_ssl_commands[] = {
       offsetof(ngx_mail_ssl_conf_t, enable),
       &ngx_mail_ssl_deprecated },
 
+    { ngx_string("ssl_mail_upsteam"),
+      NGX_MAIL_MAIN_CONF|NGX_MAIL_SRV_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_MAIL_SRV_CONF_OFFSET,
+      offsetof(ngx_mail_ssl_conf_t, enable_upstream),
+      NULL },
+
     { ngx_string("starttls"),
       NGX_MAIL_MAIN_CONF|NGX_MAIL_SRV_CONF|NGX_CONF_TAKE1,
       ngx_mail_ssl_starttls,
@@ -255,6 +262,7 @@ ngx_mail_ssl_create_conf(ngx_conf_t *cf)
      */
 
     scf->enable = NGX_CONF_UNSET;
+    scf->enable_upstream = NGX_CONF_UNSET;
     scf->starttls = NGX_CONF_UNSET_UINT;
     scf->certificates = NGX_CONF_UNSET_PTR;
     scf->certificate_keys = NGX_CONF_UNSET_PTR;
@@ -281,6 +289,7 @@ ngx_mail_ssl_merge_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_pool_cleanup_t  *cln;
 
     ngx_conf_merge_value(conf->enable, prev->enable, 0);
+    ngx_conf_merge_value(conf->enable_upstream, prev->enable_upstream, 0);
     ngx_conf_merge_uint_value(conf->starttls, prev->starttls,
                          NGX_MAIL_STARTTLS_OFF);
 

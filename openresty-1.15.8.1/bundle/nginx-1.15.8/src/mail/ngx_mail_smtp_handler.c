@@ -355,7 +355,7 @@ ngx_mail_smtp_init_protocol(ngx_event_t *rev)
         }
     }
 
-    s->mail_state = ngx_smtp_start;
+    s->client_state = ngx_smtp_start;
     c->read->handler = ngx_mail_smtp_auth_state;
 
     ngx_mail_smtp_auth_state(rev);
@@ -420,9 +420,10 @@ ngx_mail_smtp_auth_state(ngx_event_t *rev)
     ngx_str_set(&s->out, smtp_ok);
 
     if (rc == NGX_OK) {
-        switch (s->mail_state) {
+        switch (s->client_state) {
 
         case ngx_smtp_start:
+		case ngx_smtp_auth_password:
 
             switch (s->command) {
 
@@ -435,24 +436,30 @@ ngx_mail_smtp_auth_state(ngx_event_t *rev)
                 rc = ngx_mail_smtp_auth(s, c);
                 break;
 
-            case NGX_SMTP_QUIT:
+			case NGX_SMTP_DATA:
+				s->mail_state = ngx_smtp_data;
+				rc = NGX_DONE;
+				break;
+            case NGX_SMTP_QUIT://TODO state
                 s->quit = 1;
                 ngx_str_set(&s->out, smtp_bye);
                 break;
 
             case NGX_SMTP_MAIL:
+				s->mail_state = ngx_smtp_from;
                 rc = ngx_mail_smtp_mail(s, c);
                 break;
 
             case NGX_SMTP_RCPT:
+				s->mail_state = ngx_smtp_to;
                 rc = ngx_mail_smtp_rcpt(s, c);
                 break;
 
-            case NGX_SMTP_RSET:
+            case NGX_SMTP_RSET: //TODO state
                 rc = ngx_mail_smtp_rset(s, c);
                 break;
 
-            case NGX_SMTP_NOOP:
+            case NGX_SMTP_NOOP://TODO state
                 break;
 
             case NGX_SMTP_STARTTLS:
@@ -471,7 +478,7 @@ ngx_mail_smtp_auth_state(ngx_event_t *rev)
             rc = ngx_mail_auth_login_username(s, c, 0);
 
             ngx_str_set(&s->out, smtp_password);
-            s->mail_state = ngx_smtp_auth_login_password;
+            s->client_state = ngx_smtp_auth_login_password;
             break;
 
         case ngx_smtp_auth_login_password:
@@ -496,9 +503,31 @@ ngx_mail_smtp_auth_state(ngx_event_t *rev)
         s->blocked = 1;
     }
 
+	if((rc==NGX_OK||rc==NGX_DONE) && s->client_state == ngx_smtp_auth_password)
+	{
+		rc = NGX_DECLINED;
+	}
+
     switch (rc) {
 
+	case NGX_DECLINED: //原样转发命令
+		if (s->proxy->upstream.connection->send(s->proxy->upstream.connection,
+				s->buffer_cmd.data, s->buffer_cmd.len) < s->buffer_cmd.len) {
+			ngx_mail_session_internal_server_error(s);
+      		return;
+    	}
+		s->args.nelts = 0;
+        if (s->buffer->pos == s->buffer->last) {
+            s->buffer->pos = s->buffer->start;
+            s->buffer->last = s->buffer->start;
+        }
+        if (s->state) {
+            s->arg_start = s->buffer->pos;
+        }
+		break;
+		
     case NGX_DONE:
+        s->client_state = ngx_smtp_auth_password; //代表认证完成
         ngx_mail_auth(s, c);
         return;
 
@@ -507,7 +536,7 @@ ngx_mail_smtp_auth_state(ngx_event_t *rev)
         return;
 
     case NGX_MAIL_PARSE_INVALID_COMMAND:
-        s->mail_state = ngx_smtp_start;
+        s->client_state = ngx_smtp_start;
         s->state = 0;
         ngx_str_set(&s->out, smtp_invalid_command);
 
@@ -618,21 +647,21 @@ ngx_mail_smtp_auth(ngx_mail_session_t *s, ngx_connection_t *c)
     case NGX_MAIL_AUTH_LOGIN:
 
         ngx_str_set(&s->out, smtp_username);
-        s->mail_state = ngx_smtp_auth_login_username;
+        s->client_state = ngx_smtp_auth_login_username;
 
         return NGX_OK;
 
     case NGX_MAIL_AUTH_LOGIN_USERNAME:
 
         ngx_str_set(&s->out, smtp_password);
-        s->mail_state = ngx_smtp_auth_login_password;
+        s->client_state = ngx_smtp_auth_login_password;
 
         return ngx_mail_auth_login_username(s, c, 1);
 
     case NGX_MAIL_AUTH_PLAIN:
 
         ngx_str_set(&s->out, smtp_next);
-        s->mail_state = ngx_smtp_auth_plain;
+        s->client_state = ngx_smtp_auth_plain;
 
         return NGX_OK;
 
@@ -651,7 +680,7 @@ ngx_mail_smtp_auth(ngx_mail_session_t *s, ngx_connection_t *c)
         }
 
         if (ngx_mail_auth_cram_md5_salt(s, c, "334 ", 4) == NGX_OK) {
-            s->mail_state = ngx_smtp_auth_cram_md5;
+            s->client_state = ngx_smtp_auth_cram_md5;
             return NGX_OK;
         }
 
@@ -664,7 +693,7 @@ ngx_mail_smtp_auth(ngx_mail_session_t *s, ngx_connection_t *c)
         }
 
         ngx_str_set(&s->out, smtp_username);
-        s->mail_state = ngx_smtp_auth_external;
+        s->client_state = ngx_smtp_auth_external;
 
         return NGX_OK;
     }
@@ -719,7 +748,7 @@ ngx_mail_smtp_mail(ngx_mail_session_t *s, ngx_connection_t *c)
 
     ngx_str_set(&s->out, smtp_ok);
 
-    return NGX_OK;
+    return NGX_DONE;
 }
 
 

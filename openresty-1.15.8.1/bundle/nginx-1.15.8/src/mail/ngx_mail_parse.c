@@ -666,6 +666,10 @@ ngx_mail_smtp_parse_command(ngx_mail_session_t *s)
                     {
                         s->command = NGX_SMTP_EHLO;
 
+                    } else if (c0 == 'D' && c1 == 'A' && c2 == 'T' && c3 == 'A')
+                    {
+                        s->command = NGX_SMTP_DATA;
+
                     } else if (c0 == 'Q' && c1 == 'U' && c2 == 'I' && c3 == 'T')
                     {
                         s->command = NGX_SMTP_QUIT;
@@ -877,7 +881,7 @@ ngx_mail_auth_parse(ngx_mail_session_t *s, ngx_connection_t *c)
     if (arg[0].len == 5) {
 
         if (ngx_strncasecmp(arg[0].data, (u_char *) "LOGIN", 5) == 0) {
-
+			s->auth_method = NGX_MAIL_AUTH_LOGIN;
             if (s->args.nelts == 1) {
                 return NGX_MAIL_AUTH_LOGIN;
             }
@@ -890,6 +894,7 @@ ngx_mail_auth_parse(ngx_mail_session_t *s, ngx_connection_t *c)
         }
 
         if (ngx_strncasecmp(arg[0].data, (u_char *) "PLAIN", 5) == 0) {
+			s->auth_method = NGX_MAIL_AUTH_PLAIN;
 
             if (s->args.nelts == 1) {
                 return NGX_MAIL_AUTH_PLAIN;
@@ -906,6 +911,7 @@ ngx_mail_auth_parse(ngx_mail_session_t *s, ngx_connection_t *c)
     if (arg[0].len == 8) {
 
         if (ngx_strncasecmp(arg[0].data, (u_char *) "CRAM-MD5", 8) == 0) {
+			s->auth_method = NGX_MAIL_AUTH_CRAM_MD5;
 
             if (s->args.nelts != 1) {
                 return NGX_MAIL_PARSE_INVALID_COMMAND;
@@ -915,6 +921,7 @@ ngx_mail_auth_parse(ngx_mail_session_t *s, ngx_connection_t *c)
         }
 
         if (ngx_strncasecmp(arg[0].data, (u_char *) "EXTERNAL", 8) == 0) {
+			s->auth_method = NGX_MAIL_AUTH_EXTERNAL;
 
             if (s->args.nelts == 1) {
                 return NGX_MAIL_AUTH_EXTERNAL;

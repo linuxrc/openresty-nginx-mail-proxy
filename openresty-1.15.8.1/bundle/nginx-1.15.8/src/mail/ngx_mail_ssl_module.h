@@ -21,6 +21,7 @@
 
 typedef struct {
     ngx_flag_t       enable;
+    ngx_flag_t       enable_upstream;
     ngx_flag_t       prefer_server_ciphers;
 
     ngx_ssl_t        ssl;
