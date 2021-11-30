@@ -745,6 +745,8 @@ ngx_mail_smtp_mail(ngx_mail_session_t *s, ngx_connection_t *c)
 
     sscf = ngx_mail_get_module_srv_conf(s, ngx_mail_smtp_module);
 
+    ngx_log_error(NGX_LOG_INFO, c->log, 0, "auth_methods:\"%d\"", (int)sscf->auth_methods);
+
     if (!(sscf->auth_methods & NGX_MAIL_AUTH_PLAIN_ENABLED))
     {
         ngx_mail_smtp_log_rejected_command(s, c, "client was rejected: \"%V\"");
