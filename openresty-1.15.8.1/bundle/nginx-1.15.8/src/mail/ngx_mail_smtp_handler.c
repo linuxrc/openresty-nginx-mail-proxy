@@ -456,7 +456,7 @@ void ngx_mail_smtp_auth_state(ngx_event_t *rev)
                 s->mail_state = ngx_smtp_data;
                 rc = NGX_DONE;
                 break;
-            case NGX_SMTP_QUIT: //TODO state
+            case NGX_SMTP_QUIT: // TODO state
                 s->quit = 1;
                 ngx_str_set(&s->out, smtp_bye);
                 break;
@@ -471,11 +471,11 @@ void ngx_mail_smtp_auth_state(ngx_event_t *rev)
                 rc = ngx_mail_smtp_rcpt(s, c);
                 break;
 
-            case NGX_SMTP_RSET: //TODO state
+            case NGX_SMTP_RSET: // TODO state
                 rc = ngx_mail_smtp_rset(s, c);
                 break;
 
-            case NGX_SMTP_NOOP: //TODO state
+            case NGX_SMTP_NOOP: // TODO state
                 break;
 
             case NGX_SMTP_STARTTLS:
@@ -747,7 +747,7 @@ ngx_mail_smtp_mail(ngx_mail_session_t *s, ngx_connection_t *c)
 
     ngx_log_error(NGX_LOG_INFO, c->log, 0, "auth_methods:\"%d\"", (int)sscf->auth_methods);
 
-    if (!(sscf->auth_methods & NGX_MAIL_AUTH_PLAIN_ENABLED))
+    if (!(sscf->auth_methods & NGX_MAIL_AUTH_LOGIN_ENABLED))
     {
         ngx_mail_smtp_log_rejected_command(s, c, "client was rejected: \"%V\"");
         ngx_str_set(&s->out, smtp_auth_required);
